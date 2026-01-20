@@ -1,5 +1,4 @@
 # Py-Fest 2026 Stage Manager
-
 lineup = [
     ("The Pythonistas", "Rock", 45),
     ("Code Play", "Indie", 30),
