@@ -1,74 +1,99 @@
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
-import time
+from concurrent.futures import ThreadPoolExecutor
+from tqdm import tqdm
 
 BASE_URL = "https://books.toscrape.com/"
+HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+# Reuse connections for speed
+session = requests.Session()
+session.headers.update(HEADERS)
+
 
 def get_soup(url):
-    response = requests.get(url)
+    response = session.get(url)
     response.raise_for_status()
-    response.encoding = response.apparent_encoding
-    return BeautifulSoup(response.text, 'html.parser')
+
+    # Use raw bytes for best Unicode handling
+    return BeautifulSoup(response.content, "html.parser")
+
+
+def get_book_details(book_url):
+    try:
+        soup = get_soup(book_url)
+        genre_tag = soup.select_one('ul.breadcrumb li:nth-of-type(3) a')
+        return genre_tag.text.strip() if genre_tag else "Unknown"
+    except:
+        return "Unknown"
+
 
 def fetch_books(start_url):
     books = []
     url = start_url
+    page_num = 1
 
     while url:
-        print(f"Scraping page: {url}")
+        print(f"\nScraping page {page_num}: {url}")
         soup = get_soup(url)
 
-        for article in soup.select('article.product_pod'):
-            title = article.h3.a['title']
-            price = article.find('p', class_='price_color').text.strip()
-            rating = article.p['class'][1]
+        articles = soup.select('article.product_pod')
 
-            # Get book detail URL
-            relative_link = article.h3.a['href']
-            book_url = urljoin(url, relative_link)
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            tasks = []
 
-            # Fetch detail page with SAME encoding handling
-            book_soup = get_soup(book_url)
+            for article in articles:
+                title = article.h3.a['title']
+                price = article.select_one('.price_color').text.strip()
+                rating = article.p['class'][1]
 
-            genre_tag = book_soup.select_one('ul.breadcrumb li:nth-of-type(3) a')
-            genre = genre_tag.text.strip() if genre_tag else "Unknown"
+                relative_link = article.h3.a['href']
+                book_url = urljoin(url, relative_link)
 
-            books.append({
-                'title': title,
-                'price': price,
-                'rating': rating,
-                'genre': genre
-            })
+                future = executor.submit(get_book_details, book_url)
 
-            time.sleep(0.2)  # polite delay
+                tasks.append({
+                    "title": title,
+                    "price": price,
+                    "rating": rating,
+                    "future": future
+                })
+
+            # Progress bar per page
+            for task in tqdm(tasks, desc=f"Processing page {page_num}", leave=False):
+                genre = task["future"].result()
+
+                books.append({
+                    "title": task["title"],
+                    "price": task["price"],
+                    "rating": task["rating"],
+                    "genre": genre
+                })
 
         # Handle pagination
         next_button = soup.select_one('li.next a')
-        if next_button:
-            url = urljoin(url, next_button['href'])
-        else:
-            url = None
+        url = urljoin(url, next_button['href']) if next_button else None
+        page_num += 1
 
     return books
 
 
 def search_books(books, title=None, price=None, rating=None, genre=None):
-    results = []
-    for book in books:
-        if title and title.lower() not in book['title'].lower():
-            continue
-        if price and price != book['price']:
-            continue
-        if rating and rating.lower() != book['rating'].lower():
-            continue
-        if genre and genre.lower() not in book['genre'].lower():
-            continue
-        results.append(book)
-    return results
+    return [
+        book for book in books
+        if (not title or title.lower() in book['title'].lower())
+        and (not price or price == book['price'])
+        and (not rating or rating.lower() == book['rating'].lower())
+        and (not genre or genre.lower() in book['genre'].lower())
+    ]
 
 
 def print_books(books):
+    if not books:
+        print("\nNo results found.")
+        return
+
     for book in books:
         print(f"Title: {book['title']}")
         print(f"Price: {book['price']}")
@@ -84,20 +109,13 @@ if __name__ == "__main__":
         print("\nBook Search Engine")
         print("Enter search criteria (leave blank to skip):")
 
-        title = input("Title: ")
-        price = input("Price (e.g., \u00A353.74): ")
-        rating = input("Rating (e.g., Three, Five): ")
-        genre = input("Genre: ")
-
-        title = title.strip() if title else None
-        price = price.strip() if price else None
-        rating = rating.strip() if rating else None
-        genre = genre.strip() if genre else None
+        title = input("Title: ").strip() or None
+        price = input("Price (e.g., £53.74): ").strip() or None
+        rating = input("Rating (e.g., Three, Five): ").strip() or None
+        genre = input("Genre: ").strip() or None
 
         results = search_books(books, title, price, rating, genre)
-
-        print(f"\nFound {len(results)} book(s):\n")
         print_books(results)
 
     except Exception as e:
-        print(f"An error occurred: {e}")
+        print(f"Error: {e}")
